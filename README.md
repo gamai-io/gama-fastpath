@@ -1,5 +1,10 @@
 # gama-fastpath
 
+<p align="center"><img src="assets/logo.svg" width="96" alt="GAMA logo"></p>
+
+[![Version](https://img.shields.io/badge/version-v0.1.0-22d3ee)](https://github.com/gamai-io/gama-fastpath/releases)
+
+
 Deterministic **pre-LLM gate**: blocks catastrophic/destructive or env-disclosure
 requests and answers money math without any model call. Offline, stdlib only.
 
