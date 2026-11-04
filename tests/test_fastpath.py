@@ -1,9 +1,15 @@
-import os, sys, unittest
+import os, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["GAMA_FASTPATH_DB"] = "/tmp/gama_fastpath_test.db"
 import fastpath as f
 
 class T(unittest.TestCase):
+    def setUp(self):
+        self._db = tempfile.mktemp(suffix=".db")
+        f.DB = self._db
+    def tearDown(self):
+        try: os.remove(self._db)
+        except OSError: pass
     def test_t1(self):
         for q in ("rm -rf /", "drop table kupci", "Obriši sve fajlove", "mkfs.ext4 /dev/sda"):
             self.assertTrue(f.optimize(q)["blocked"], q)
