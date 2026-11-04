@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""GAMA FastPath — deterministic pre-LLM gate (offline, 0 model calls).
+
+POST /optimize {"text": "..."} -> {"ok":true,"route":"block|math|math_pdv|cache|time|know|llm", ...}
+GET  /health, /stats
+"""
+import json, os, re, sqlite3, time
+from decimal import Decimal, ROUND_HALF_UP
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(os.environ.get("GAMA_FASTPATH_PORT", "8071"))
+DB = os.environ.get("GAMA_FASTPATH_DB", "/tmp/gama_fastpath.db")
+TTL = int(os.environ.get("GAMA_FASTPATH_TTL", "21600"))
+
+T1 = [r"\brm\s+-rf\s+[/~*]", r"\bmkfs\b", r"\bdd\s+if=.*of=/dev/", r"\bdrop\s+(table|database)\b",
+      r"\btruncate\s+table\b", r"\bshutdown\b", r"\breboot\b", r"\bobrisi\s+(sve|bazu|disk)\b", r"\bizbrisi\s+bazu\b"]
+T2 = [r"\bobrisi\s+(fajl|folder|log)\b", r"\bobrisi\s+/var\b", r"\bobrisi\s+.*\b(log|fajl|folder)\b",
+      r"\bizbrisi\s+.*\b(log|fajl|folder)\b", r"\bdelete\s+file\b", r"\bchmod\s+777\b", r"\bchown\s+-R\b",
+      r"\bkillall\b", r"\bpkill\s+-9\b",
+      r"\bignorisi\s+(sva\s+)?(prethodna\s+)?(uputstv|instrukcij)", r"\bti\s+si\s+root\b", r"\bpotvrdi\s+da\s+si\s+root\b",
+      r"\b(ispisi|prikazi|daj|izlistaj|podijeli|podeli)\s+(mi\s+)?(sve\s+)?(env|environment|varijabl)",
+      r"\bposalji\s+(mail|email|e-mail|poruku)\b.*\b(svim|sve)\b"]
+T1C = [re.compile(p, re.I) for p in T1]
+T2C = [re.compile(p, re.I) for p in T2]
+FOLD = str.maketrans("čćžšđČĆŽŠĐ", "cczsdCCZSD")
+STATS = {"calls": 0, "hit": 0, "blocked": 0, "answered": 0}
+
+def fold(t): return str(t or "").translate(FOLD)
+def norm(t): return re.sub(r"\s+", " ", fold(t).lower().strip())
+
+def db():
+    c = sqlite3.connect(DB, timeout=3)
+    c.execute("CREATE TABLE IF NOT EXISTS cache(k TEXT PRIMARY KEY, a TEXT, ts REAL)")
+    return c
+
+def cache_get(k):
+    try:
+        c = db(); r = c.execute("SELECT a,ts FROM cache WHERE k=?", (k,)).fetchone(); c.close()
+        if r and (time.time() - r[1]) < TTL: return r[0]
+    except Exception: pass
+    return None
+
+def cache_put(k, a):
+    try:
+        c = db(); c.execute("INSERT OR REPLACE INTO cache(k,a,ts) VALUES(?,?,?)", (k, a, time.time()))
+        c.commit(); c.close()
+    except Exception: pass
+
+def pdv_na_neto(t):
+    m = re.search(r"pdv\s*(\d+(?:[.,]\d+)?)\s*%\s*na\s*neto\s*(\d+(?:[.,]\d+)?)", t, re.I)
+    if not m: return None
+    p = Decimal(m.group(1).replace(",", ".")); n = Decimal(m.group(2).replace(",", "."))
+    return str((n * (Decimal(1) + p / Decimal(100))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+def pct(t):
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*%\s*(?:od|of)\s*(\d+(?:[.,]\d+)?)", t, re.I)
+    if not m: return None
+    p = Decimal(m.group(1).replace(",", ".")); x = Decimal(m.group(2).replace(",", "."))
+    return "%s%% od %s = %s" % (m.group(1), m.group(2),
+        str((p / Decimal(100) * x).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)).replace(".", ","))
+
+def optimize(text):
+    t0 = time.time(); STATS["calls"] += 1
+    t = str(text or "").strip(); low = norm(t)
+    ms = lambda: round((time.time() - t0) * 1000, 2)
+    for p in T1C:
+        if p.search(low):
+            STATS["blocked"] += 1
+            return {"ok": True, "route": "block", "blocked": True, "answer": "Ne mogu to izvrsiti (opasna komanda).", "ms": ms()}
+    for p in T2C:
+        if p.search(low):
+            STATS["blocked"] += 1
+            return {"ok": True, "route": "block", "blocked": True, "answer": "Ne mogu to izvrsiti bez izricite potvrde.", "ms": ms()}
+    k = "q:" + low
+    hit = cache_get(k)
+    if hit:
+        STATS["hit"] += 1
+        return {"ok": True, "route": "cache", "cached": True, "answer": hit, "ms": ms()}
+    v = pdv_na_neto(t)
+    if v:
+        cache_put(k, v); STATS["answered"] += 1
+        return {"ok": True, "route": "math_pdv", "answer": v, "ms": ms()}
+    v = pct(t)
+    if v:
+        cache_put(k, v); STATS["answered"] += 1
+        return {"ok": True, "route": "math", "answer": v, "ms": ms()}
+    if re.fullmatch(r"(koje je )?(vrijeme|datum|danas)\??", low):
+        return {"ok": True, "route": "time", "answer": time.strftime("%d.%m.%Y %H:%M"), "ms": ms()}
+    return {"ok": True, "route": "llm", "ms": ms()}
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, obj, code=200):
+        b = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_GET(self):
+        if self.path.startswith("/health"): return self._send({"ok": True, "svc": "gama-fastpath", "port": PORT})
+        if self.path.startswith("/stats"): return self._send({"ok": True, **STATS})
+        self._send({"ok": False, "err": "not found"}, 404)
+    def do_POST(self):
+        try:
+            n = int(self.headers.get("Content-Length") or 0); j = json.loads(self.rfile.read(n) or b"{}")
+        except Exception as e: return self._send({"ok": False, "err": str(e)[:120]}, 400)
+        if self.path.startswith("/optimize"): return self._send(optimize(j.get("text", "")))
+        if self.path.startswith("/store"):
+            a = str(j.get("answer", ""))
+            if a: cache_put("q:" + norm(j.get("text", "")), a)
+            return self._send({"ok": True})
+        self._send({"ok": False, "err": "not found"}, 404)
+
+def main():
+    print("gama-fastpath :%d" % PORT, flush=True)
+    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
+
+if __name__ == "__main__": main()
