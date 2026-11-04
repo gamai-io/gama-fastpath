@@ -31,3 +31,7 @@ Tests: `python3 -m unittest discover -s tests -v`
 - Related: https://github.com/gamai-io/crossnode-bench (DOI 10.5281/zenodo.23933835).
 
 Apache-2.0.
+## Tests
+```bash
+make test
+```
