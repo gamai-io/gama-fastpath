@@ -123,6 +123,13 @@ def optimize(text):
         return {"ok": True, "route": "time", "answer": time.strftime("%d.%m.%Y %H:%M"), "ms": ms()}
     return {"ok": True, "route": "llm", "ms": ms()}
 
+def store_allowed(client_ip, token):
+    """Loopback is trusted for local MCP; remote callers need the configured token."""
+    if client_ip in ("127.0.0.1", "::1"):
+        return True
+    return bool(STORE_TOKEN) and hmac.compare_digest(str(token or ""), STORE_TOKEN)
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _send(self, obj, code=200):
@@ -147,11 +154,8 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/optimize"):
             return self._send(optimize(j.get("text", "")))
         if self.path.startswith("/store"):
-            remote = self.client_address[0] not in ("127.0.0.1", "::1")
-            if remote:
-                tok = self.headers.get("X-Store-Token", "")
-                if not STORE_TOKEN or not hmac.compare_digest(tok, STORE_TOKEN):
-                    return self._send({"ok": False, "err": "forbidden"}, 403)
+            if not store_allowed(self.client_address[0], self.headers.get("X-Store-Token", "")):
+                return self._send({"ok": False, "err": "forbidden"}, 403)
             a = str(j.get("answer", ""))
             if a: cache_put("q:" + norm(j.get("text", "")), a)
             return self._send({"ok": True})

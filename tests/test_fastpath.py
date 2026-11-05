@@ -40,6 +40,20 @@ class T(unittest.TestCase):
         for raw, want in cases.items():
             self.assertEqual(str(f.parse_amount(raw)), want, raw)
 
+
+    def test_store_gate(self):
+        self.assertTrue(f.store_allowed("127.0.0.1", ""))
+        self.assertTrue(f.store_allowed("::1", ""))
+        self.assertFalse(f.store_allowed("100.64.0.5", ""))
+        self.assertFalse(f.store_allowed("100.64.0.5", "wrong"))
+        old = f.STORE_TOKEN
+        try:
+            f.STORE_TOKEN = "sekrit"
+            self.assertTrue(f.store_allowed("100.64.0.5", "sekrit"))
+            self.assertFalse(f.store_allowed("100.64.0.5", "wrong"))
+        finally:
+            f.STORE_TOKEN = old
+
     def test_fold(self):
         self.assertEqual(f.norm("Obriši"), "obrisi")
     def test_routes(self):
