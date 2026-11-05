@@ -29,7 +29,7 @@ Tests: `python3 -m unittest discover -s tests -v`
 
 ## Measured
 - T1 block **0.03 ms**, T2 block **0.06–0.94 ms**, PDV **6.2 ms** first call (then cache).
-- LUMI MI250X guarded bench: false_success 19.7% raw -> **0/1,000** and **0/10,000 (PASS)**, 114.4 rps @ CONC=512.
+- LUMI MI250X guarded bench: false_success 19.7% raw -> **0/1,000**; 10k rerun (2026-11-04) **1/10,000 (FAIL)** — earlier 0/10,000 not reproduced; 114.4 rps @ CONC=512 (prior run).
 - Related: https://github.com/gamai-io/crossnode-bench (DOI 10.5281/zenodo.23933835).
 
 Apache-2.0.
