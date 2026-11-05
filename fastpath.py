@@ -4,13 +4,16 @@
 POST /optimize {"text": "..."} -> {"ok":true,"route":"block|math|math_pdv|cache|time|know|llm", ...}
 GET  /health, /stats
 """
-import json, os, re, sqlite3, time
+import hmac, json, os, re, sqlite3, time
 from decimal import Decimal, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("GAMA_FASTPATH_PORT", "8071"))
 DB = os.environ.get("GAMA_FASTPATH_DB", "/tmp/gama_fastpath.db")
 TTL = int(os.environ.get("GAMA_FASTPATH_TTL", "21600"))
+BIND = os.environ.get("GAMA_FASTPATH_BIND", "0.0.0.0")
+MAX_BODY = int(os.environ.get("GAMA_FASTPATH_MAX_BODY", "262144"))
+STORE_TOKEN = os.environ.get("GAMA_FASTPATH_STORE_TOKEN", "")
 
 T1 = [r"\brm\s+-rf\s+[/~*]", r"\bmkfs\b", r"\bdd\s+if=.*of=/dev/", r"\bdrop\s+(table|database)\b",
       r"\btruncate\s+table\b", r"\bshutdown\b", r"\breboot\b", r"\bobrisi\s+(sve|bazu|disk)\b", r"\bizbrisi\s+bazu\b"]
@@ -46,18 +49,50 @@ def cache_put(k, a):
         c.commit(); c.close()
     except Exception: pass
 
+def parse_amount(raw):
+    """Parse BHS/EU/US money formats deterministically: 2.400,00 | 1.234.567,89 | 2,400.00 | 2400."""
+    t = str(raw or "").strip().replace("\u00a0", "").replace(" ", "")
+    neg = t.startswith("-")
+    t = t.lstrip("+-")
+    t = re.sub(r"[^0-9.,]", "", t).strip(".,")
+    if not t:
+        raise ValueError("no amount")
+    if "." in t and "," in t:
+        if t.rfind(",") > t.rfind("."):
+            t = t.replace(".", "").replace(",", ".")
+        else:
+            t = t.replace(",", "")
+    elif "," in t:
+        parts = t.split(",")
+        if len(parts) > 2:
+            t = t.replace(",", "")
+        else:
+            t = t.replace(",", ".")
+    elif "." in t:
+        parts = t.split(".")
+        if len(parts) > 2 or (len(parts) == 2 and len(parts[1]) == 3):
+            t = t.replace(".", "")
+    v = Decimal(t)
+    return -v if neg else v
+
+
 def pdv_na_neto(t):
-    m = re.search(r"pdv\s*(\d+(?:[.,]\d+)?)\s*%\s*na\s*neto\s*(\d+(?:[.,]\d+)?)", t, re.I)
-    if not m: return None
-    p = Decimal(m.group(1).replace(",", ".")); n = Decimal(m.group(2).replace(",", "."))
+    """PDV_NA_NETO_V2: 'PDV 17% na neto 2.400,00' -> 2808.00 (Decimal, half-up)."""
+    m = re.search(r"pdv\s*(\d[\d.,]*)\s*%\s*na\s*neto\s*(\d[\d.,]*)", t, re.I)
+    if not m:
+        return None
+    p = parse_amount(m.group(1)); n = parse_amount(m.group(2))
     return str((n * (Decimal(1) + p / Decimal(100))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
+
 def pct(t):
-    m = re.search(r"(\d+(?:[.,]\d+)?)\s*%\s*(?:od|of)\s*(\d+(?:[.,]\d+)?)", t, re.I)
-    if not m: return None
-    p = Decimal(m.group(1).replace(",", ".")); x = Decimal(m.group(2).replace(",", "."))
-    return "%s%% od %s = %s" % (m.group(1), m.group(2),
-        str((p / Decimal(100) * x).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)).replace(".", ","))
+    m = re.search(r"(\d[\d.,]*)\s*%\s*(?:od|of)\s*(\d[\d.,]*)", t, re.I)
+    if not m:
+        return None
+    p = parse_amount(m.group(1)); x = parse_amount(m.group(2))
+    v = (p / Decimal(100) * x).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return "%s%% od %s = %s" % (m.group(1), m.group(2), str(v).replace(".", ","))
+
 
 def optimize(text):
     t0 = time.time(); STATS["calls"] += 1
@@ -100,10 +135,23 @@ class H(BaseHTTPRequestHandler):
         self._send({"ok": False, "err": "not found"}, 404)
     def do_POST(self):
         try:
-            n = int(self.headers.get("Content-Length") or 0); j = json.loads(self.rfile.read(n) or b"{}")
-        except Exception as e: return self._send({"ok": False, "err": str(e)[:120]}, 400)
-        if self.path.startswith("/optimize"): return self._send(optimize(j.get("text", "")))
+            n = int(self.headers.get("Content-Length") or 0)
+        except Exception:
+            return self._send({"ok": False, "err": "bad content-length"}, 400)
+        if n > MAX_BODY:
+            return self._send({"ok": False, "err": "request too large"}, 413)
+        try:
+            j = json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            return self._send({"ok": False, "err": "bad json"}, 400)
+        if self.path.startswith("/optimize"):
+            return self._send(optimize(j.get("text", "")))
         if self.path.startswith("/store"):
+            remote = self.client_address[0] not in ("127.0.0.1", "::1")
+            if remote:
+                tok = self.headers.get("X-Store-Token", "")
+                if not STORE_TOKEN or not hmac.compare_digest(tok, STORE_TOKEN):
+                    return self._send({"ok": False, "err": "forbidden"}, 403)
             a = str(j.get("answer", ""))
             if a: cache_put("q:" + norm(j.get("text", "")), a)
             return self._send({"ok": True})
@@ -111,6 +159,6 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     print("gama-fastpath :%d" % PORT, flush=True)
-    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
+    ThreadingHTTPServer((BIND, PORT), H).serve_forever()
 
 if __name__ == "__main__": main()

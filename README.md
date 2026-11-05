@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/gamai-io/gama-fastpath/actions/workflows/ci.yml/badge.svg)](https://github.com/gamai-io/gama-fastpath/actions/workflows/ci.yml)
 
-[![Version](https://img.shields.io/badge/version-v0.1.0-22d3ee)](https://github.com/gamai-io/gama-fastpath/releases)
+[![Version](https://img.shields.io/badge/version-v0.1.1-22d3ee)](https://github.com/gamai-io/gama-fastpath/releases)
 
 
 Deterministic **pre-LLM gate**: blocks catastrophic/destructive or env-disclosure
@@ -37,3 +37,21 @@ Apache-2.0.
 ```bash
 make test
 ```
+
+## Security / deployment
+
+- Default bind is `GAMA_FASTPATH_BIND=0.0.0.0` for LAN/Tailscale callers. On a public
+  host, block the port at the firewall (verified on Contabo: ufw default-DROP, port 8071
+  unreachable from an external node while 80/443 answer).
+- `POST /store` is **loopback-only**. Remote callers must set `GAMA_FASTPATH_STORE_TOKEN`
+  and send it as `X-Store-Token`; without it the endpoint answers `403`.
+- Request bodies are capped by `GAMA_FASTPATH_MAX_BODY` (default 262144 bytes) and
+  oversized requests get `413`, so one client cannot exhaust memory.
+- The HTTP handler never echoes parser exceptions back to the caller.
+
+## Money formats
+
+`parse_amount` accepts BHS/EU/US thousands separators deterministically (Decimal, half-up):
+`2400`, `2.400`, `2.400,00`, `1.234.567,89`, `2,400.00` all resolve correctly. Regression
+tests cover these forms; the earlier regex stopped at the first separator and returned
+`2.81` for `2.400,00`.

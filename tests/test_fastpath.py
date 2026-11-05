@@ -23,6 +23,23 @@ class T(unittest.TestCase):
         self.assertEqual(f.pdv_na_neto("PDV 17% na neto 2400"), "2808.00")
     def test_pct(self):
         self.assertEqual(f.pct("17% od 1450"), "17% od 1450 = 246,50")
+    def test_pdv_formats(self):
+        for q in ("PDV 17% na neto 2400", "PDV 17% na neto 2.400", "PDV 17% na neto 2.400,00",
+                  "PDV 17% na neto 2,400.00"):
+            self.assertEqual(f.pdv_na_neto(q), "2808.00", q)
+        self.assertEqual(f.pdv_na_neto("PDV 17% na neto 1.234.567,89"), "1444444.43")
+
+    def test_pct_formats(self):
+        self.assertEqual(f.pct("17% od 1450"), "17% od 1450 = 246,50")
+        self.assertEqual(f.pct("17% od 1.450,00"), "17% od 1.450,00 = 246,50")
+        self.assertEqual(f.pct("17% od 1,450.00"), "17% od 1,450.00 = 246,50")
+
+    def test_parse_amount(self):
+        cases = {"2.400,00":"2400.00", "1.234.567,89":"1234567.89", "2,400.00":"2400.00",
+                 "2400":"2400", "1.450,00":"1450.00", "2.400":"2400", "-17,5":"-17.5"}
+        for raw, want in cases.items():
+            self.assertEqual(str(f.parse_amount(raw)), want, raw)
+
     def test_fold(self):
         self.assertEqual(f.norm("Obriši"), "obrisi")
     def test_routes(self):
