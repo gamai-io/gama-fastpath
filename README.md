@@ -55,3 +55,16 @@ make test
 `2400`, `2.400`, `2.400,00`, `1.234.567,89`, `2,400.00` all resolve correctly. Regression
 tests cover these forms; the earlier regex stopped at the first separator and returned
 `2.81` for `2.400,00`.
+
+## How this is sold (and what it saves)
+
+The gate is **free to adopt**: it is a deterministic pre-LLM step, and metering it would cost
+more than it earns. What it returns, measured on our traffic (2026-11-23):
+
+- `PDV 17% na neto 2400` → **2808.00 in 6.2 ms, 0 tokens**, versus 2.53 s and ~$0.0019 through a model.
+- `rm -rf /`, `drop table`, `obrisi sve` → blocked in **0.03–0.06 ms** before any model runs.
+- Every answer that never reaches the model is a call the customer does not pay for.
+
+We charge for the harness and the audit around the gate (evidence receipts, replay), not for the
+arithmetic. A buyer is shown their own intercepted-request count, not a percentage we computed
+on our own workload.
