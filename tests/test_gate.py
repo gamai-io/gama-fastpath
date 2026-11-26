@@ -31,7 +31,7 @@ REPRODUCED = {
     "find / -delete": "find_delete",
     "find / -exec rm -rf {} +": "find_exec_delete",
     ":(){ :|:& };:": "fork_bomb",
-    "delete from kupdob": "sql_delete_without_where",
+    "delete from orders": "sql_delete_without_where",
     "chmod -R 777 /": "permissions_root",
     "cat /etc/shadow": "sensitive_file_read",
     "cat /etc/passwd": "sensitive_file_read",
@@ -54,7 +54,7 @@ BENIGN = [
     "17% od 1450",
     "pokazi mi listu kupaca",
     "posalji mejl kupcu Ivanu",
-    "delete from kupdob where id=5",
+    "delete from orders where id=5",
     "update kupci set ime='Ana' where id=5",
     "rm -rf ./build",
     "kako da napravim .env fajl",
@@ -98,7 +98,7 @@ class GateTest(unittest.TestCase):
             self.assertIsNotNone(gate.check(text), text)
 
     def test_sql_requires_where(self):
-        self.assertIsNotNone(gate.check("DELETE FROM kupdob;"))
+        self.assertIsNotNone(gate.check("DELETE FROM orders;"))
         self.assertIsNone(gate.check("DELETE FROM kupdob WHERE id=5;"))
         self.assertIsNone(gate.check("/* delete from x */ select 1"))
 
