@@ -4,31 +4,63 @@
 
 [![CI](https://github.com/gamai-io/gama-fastpath/actions/workflows/ci.yml/badge.svg)](https://github.com/gamai-io/gama-fastpath/actions/workflows/ci.yml)
 
-[![Version](https://img.shields.io/badge/version-v0.1.1-22d3ee)](https://github.com/gamai-io/gama-fastpath/releases)
+[![Version](https://img.shields.io/badge/version-v0.1.2-22d3ee)](https://github.com/gamai-io/gama-fastpath/releases)
 
 
 Deterministic **pre-LLM gate**: blocks catastrophic/destructive or env-disclosure
 requests and answers money math without any model call. Offline, stdlib only.
 
-- `T1` catastrophic: `rm -rf /`, `mkfs`, `drop table`, `shutdown`, `obriši sve`...
-- `T2` high-risk / policy: `obriši /var/log`, `chmod 777`, prompt-injection
-  ("ignoriši uputstva", "ti si root", "ispiši env"), mass-mail ("svim kupcima").
+- **Structural gate** (`gate.py`): shell requests are split into statements and
+  pipelines, tokenised with `shlex`, wrappers (`sudo`, `env`, `xargs`,
+  `timeout`, ...) are unwrapped, and `sh -c` payloads plus `$(...)`/backtick
+  substitutions are analysed recursively. Flags may be reordered, quoted or
+  abbreviated; it is the parsed argv that decides, not a phrase list.
+  - recursive delete/overwrite of `/`, `/etc`, home (`~`, `$HOME`) — including
+    `rm -fr /`, `rm --recursive --force /`, `sudo rm -rf --no-preserve-root /`
+  - `find ... -delete` / `find ... -exec rm`
+  - SQL `drop` / `truncate`, and `delete`/`update` **without `WHERE`**
+  - reads of `/etc/shadow`, `/etc/passwd`, `id_rsa`, `.env`, cloud credentials
+  - `curl|wget ... | sh|bash|python`, `sh -c "$(curl ...)"`, `eval $(curl ...)`
+  - mass outbound mail (`pošalji mejl svim kupcima`, `send email to all customers`)
+  - fork bombs, `mkfs`/`dd of=/dev/sd*`, recursive `chmod`/`chown` on `/`
+- Each denial returns `route:"block"`, `blocked:true`, a stable `code` and a
+  human `reason` (e.g. `destructive_root_delete`, `sql_delete_without_where`,
+  `sensitive_file_read`, `remote_code_exec`, `bulk_mail`).
+- `T1`/`T2` regexes remain only as a cheap pre-filter for natural-language
+  policy phrases (prompt injection), not as the gate.
 - Math: `PDV 17% na neto 2400` -> **2808.00**; `17% od 1450` -> 246,50 (Decimal, half-up).
 - Diacritics fold: `Obriši` -> `obrisi` (risk match works on Bosnian text).
-- SQLite response cache (TTL 6 h), `/stats`.
+- SQLite response cache (TTL 6 h) keyed by a **SHA-256 of the full normalized
+  request + tenant/session**, `/stats`.
 
 ## Run
 ```bash
 python3 fastpath.py            # :8071
 curl -s localhost:8071/optimize -d '{"text":"Obriši sve fajlove u /var/log"}'
-# {"route":"block","blocked":true,...}
+# {"route":"block","blocked":true,"code":"catastrophic_command","reason":"...",...}
+curl -s localhost:8071/optimize -d '{"text":"rm -fr /"}'
+# {"route":"block","blocked":true,"code":"destructive_root_delete",...}
 curl -s localhost:8071/optimize -d '{"text":"PDV 17% na neto 2400"}'
 # {"route":"math_pdv","answer":"2808.00",...}
 ```
 Tests: `python3 -m unittest discover -s tests -v`
 
+### CLI and exit codes
+
+```bash
+python3 fastpath.py --check 'rm -fr /'   # prints JSON, exit 3
+python3 fastpath.py --check 'zdravo'     # prints JSON, exit 0
+```
+
+| exit | meaning |
+|------|---------|
+| `0`  | request allowed/answered (may still route to `llm`) |
+| `3`  | denied by the gate (`blocked:true`, with `code` + `reason`) |
+| `2`  | usage error (missing `--check` argument) |
+
 ## Measured
-- T1 block **0.03 ms**, T2 block **0.06–0.94 ms**, PDV **6.2 ms** first call (then cache).
+- T1 block **0.03 ms**, T2 block **0.06–0.94 ms**, PDV **6.2 ms** cold first
+  call (math is recomputed on every request, never served from the cache).
 - LUMI MI250X guarded bench: false_success 19.7% raw -> **0/1,000**; 10k rerun (2026-11-04) **1/10,000 (FAIL)** — earlier 0/10,000 not reproduced; 114.4 rps @ CONC=512 (prior run).
 - Related: https://github.com/gamai-io/crossnode-bench (DOI 10.5281/zenodo.23933835).
 
@@ -37,6 +69,16 @@ Apache-2.0.
 ```bash
 make test
 ```
+
+## Cache safety
+
+- The key is `SHA-256({"v","t","s"})` where `t` is the **full normalized
+  request** and `s` is an optional tenant/session (`sid` or `tenant` in the
+  body, or `X-Tenant-ID`). Two different inputs or tenants can never share an
+  entry, and caller text is not stored in the key.
+- Deterministic math is computed **before** the cache lookup and is never
+  read from it, so a stored answer cannot override `PDV ...` arithmetic
+  (regression: storing `0.00` for a PDV query still returns `2808.00`).
 
 ## Security / deployment
 

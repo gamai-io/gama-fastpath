@@ -4,9 +4,11 @@
 POST /optimize {"text": "..."} -> {"ok":true,"route":"block|math|math_pdv|cache|time|know|llm", ...}
 GET  /health, /stats
 """
-import hmac, json, os, re, sqlite3, time
+import hashlib, hmac, json, os, re, sqlite3, sys, time
 from decimal import Decimal, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import gate
 
 PORT = int(os.environ.get("GAMA_FASTPATH_PORT", "8071"))
 DB = os.environ.get("GAMA_FASTPATH_DB", "/tmp/gama_fastpath.db")
@@ -30,6 +32,22 @@ STATS = {"calls": 0, "hit": 0, "blocked": 0, "answered": 0}
 
 def fold(t): return str(t or "").translate(FOLD)
 def norm(t): return re.sub(r"\s+", " ", fold(t).lower().strip())
+
+CACHE_VERSION = "v1"
+
+
+def cache_key(text, sid=""):
+    """Cache key = hash of the full normalized request (text + tenant).
+
+    Hashing the whole request means two different inputs can never share an
+    entry, and the key contains no caller-controlled plaintext.  ``sid`` is an
+    optional tenant/session scope: entries from one caller are not served to
+    another.
+    """
+    payload = json.dumps({"v": CACHE_VERSION, "t": norm(text), "s": str(sid or "")},
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "q:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
 
 def db():
     c = sqlite3.connect(DB, timeout=3)
@@ -94,31 +112,44 @@ def pct(t):
     return "%s%% od %s = %s" % (m.group(1), m.group(2), str(v).replace(".", ","))
 
 
-def optimize(text):
+def _blocked(code, reason, elapsed):
+    STATS["blocked"] += 1
+    return {"ok": True, "route": "block", "blocked": True, "code": code,
+            "reason": reason, "answer": "Ne mogu to izvrsiti: %s." % reason,
+            "ms": elapsed()}
+
+
+def optimize(text, sid=""):
     t0 = time.time(); STATS["calls"] += 1
     t = str(text or "").strip(); low = norm(t)
     ms = lambda: round((time.time() - t0) * 1000, 2)
+    # Structural gate first: parse shell/SQL intent, do not trust phrasing.
+    d = gate.check(t)
+    if d:
+        return _blocked(d.code, d.reason, ms)
+    # Keyword lists stay only as a cheap pre-filter for policy phrases
+    # (prompt injection, natural-language intent) that are not shell/SQL.
     for p in T1C:
         if p.search(low):
-            STATS["blocked"] += 1
-            return {"ok": True, "route": "block", "blocked": True, "answer": "Ne mogu to izvrsiti (opasna komanda).", "ms": ms()}
+            return _blocked("catastrophic_command", "opasna komanda", ms)
     for p in T2C:
         if p.search(low):
-            STATS["blocked"] += 1
-            return {"ok": True, "route": "block", "blocked": True, "answer": "Ne mogu to izvrsiti bez izricite potvrde.", "ms": ms()}
-    k = "q:" + low
+            return _blocked("policy", "nije dozvoljeno bez izricite potvrde", ms)
+    # Deterministic math is authoritative: it is computed *before* the cache,
+    # so a poisoned/cross-tenant entry can never override a numeric answer.
+    v = pdv_na_neto(t)
+    if v:
+        STATS["answered"] += 1
+        return {"ok": True, "route": "math_pdv", "answer": v, "ms": ms()}
+    v = pct(t)
+    if v:
+        STATS["answered"] += 1
+        return {"ok": True, "route": "math", "answer": v, "ms": ms()}
+    k = cache_key(t, sid)
     hit = cache_get(k)
     if hit:
         STATS["hit"] += 1
         return {"ok": True, "route": "cache", "cached": True, "answer": hit, "ms": ms()}
-    v = pdv_na_neto(t)
-    if v:
-        cache_put(k, v); STATS["answered"] += 1
-        return {"ok": True, "route": "math_pdv", "answer": v, "ms": ms()}
-    v = pct(t)
-    if v:
-        cache_put(k, v); STATS["answered"] += 1
-        return {"ok": True, "route": "math", "answer": v, "ms": ms()}
     if re.fullmatch(r"(koje je )?(vrijeme|datum|danas)\??", low):
         return {"ok": True, "route": "time", "answer": time.strftime("%d.%m.%Y %H:%M"), "ms": ms()}
     return {"ok": True, "route": "llm", "ms": ms()}
@@ -151,18 +182,37 @@ class H(BaseHTTPRequestHandler):
             j = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             return self._send({"ok": False, "err": "bad json"}, 400)
+        sid = str(j.get("sid") or j.get("tenant") or
+                  self.headers.get("X-Tenant-ID") or "")
         if self.path.startswith("/optimize"):
-            return self._send(optimize(j.get("text", "")))
+            return self._send(optimize(j.get("text", ""), sid=sid))
         if self.path.startswith("/store"):
             if not store_allowed(self.client_address[0], self.headers.get("X-Store-Token", "")):
                 return self._send({"ok": False, "err": "forbidden"}, 403)
             a = str(j.get("answer", ""))
-            if a: cache_put("q:" + norm(j.get("text", "")), a)
+            if a: cache_put(cache_key(j.get("text", ""), sid), a)
             return self._send({"ok": True})
         self._send({"ok": False, "err": "not found"}, 404)
 
-def main():
+USAGE = "usage: fastpath.py [--check TEXT]   (serve :%d by default)" % PORT
+
+
+def main(argv=None):
+    """Exit codes: 0 = allowed/answered, 3 = denied by the gate, 2 = usage."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("--check", "-c", "check"):
+        if len(argv) < 2:
+            print(json.dumps({"ok": False, "err": USAGE}), flush=True)
+            return 2
+        text = " ".join(argv[1:])
+        r = optimize(text)
+        print(json.dumps(r, ensure_ascii=False), flush=True)
+        return 3 if r.get("blocked") else 0
+    if argv and argv[0] not in ("--serve", "serve"):
+        print(json.dumps({"ok": False, "err": USAGE}), flush=True)
+        return 2
     print("gama-fastpath :%d" % PORT, flush=True)
     ThreadingHTTPServer((BIND, PORT), H).serve_forever()
+    return 0
 
-if __name__ == "__main__": main()
+if __name__ == "__main__": sys.exit(main())
