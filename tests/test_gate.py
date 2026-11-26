@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.environ.setdefault("GAMA_FASTPATH_DB", "/tmp/gama_fastpath_test.db")
 import fastpath as f
-import gate
+from dsc import gate
 
 # text -> expected denial code (all 15 audit bypasses + the 2 that already worked)
 REPRODUCED = {
@@ -168,6 +168,35 @@ class CacheTest(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
             th.join(timeout=5)
+
+
+class SharedCodeTest(unittest.TestCase):
+    """The gate and the money parser must be imported, never copied again."""
+
+    def test_amount_is_dsc_amount(self):
+        import dsc.amount
+        self.assertIs(f.parse_amount, dsc.amount.parse_amount)
+
+    def test_gate_is_dsc_gate(self):
+        from dsc import gate as dsc_gate
+        self.assertIs(gate, dsc_gate)
+        self.assertEqual(dsc_gate.check("rm -fr /").code, "destructive_root_delete")
+        self.assertEqual(f.optimize("rm -fr /")["code"], "destructive_root_delete")
+
+    def test_no_local_gate_module(self):
+        self.assertFalse(os.path.exists(os.path.join(ROOT, "gate.py")),
+                         "gate.py came back; import dsc.gate instead")
+
+    def test_no_duplicate_definitions_in_fastpath(self):
+        import ast
+        with open(os.path.join(ROOT, "fastpath.py"), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        funcs = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+        self.assertNotIn("parse_amount", funcs)
+        assigned = [t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                    for t in n.targets if isinstance(t, ast.Name)]
+        self.assertNotIn("T1", assigned)
+        self.assertNotIn("T2", assigned)
 
 
 class CLITest(unittest.TestCase):

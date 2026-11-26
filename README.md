@@ -10,11 +10,12 @@
 Deterministic **pre-LLM gate**: blocks catastrophic/destructive or env-disclosure
 requests and answers money math without any model call. Offline, stdlib only.
 
-- **Structural gate** (`gate.py`): shell requests are split into statements and
-  pipelines, tokenised with `shlex`, wrappers (`sudo`, `env`, `xargs`,
-  `timeout`, ...) are unwrapped, and `sh -c` payloads plus `$(...)`/backtick
-  substitutions are analysed recursively. Flags may be reordered, quoted or
-  abbreviated; it is the parsed argv that decides, not a phrase list.
+- **Structural gate** (`dsc.gate`, pinned as a `dsc` dependency): shell requests
+  are split into statements and pipelines, tokenised with `shlex`, wrappers
+  (`sudo`, `env`, `xargs`, `timeout`, ...) are unwrapped, and `sh -c` payloads
+  plus `$(...)`/backtick substitutions are analysed recursively. Flags may be
+  reordered, quoted or abbreviated; it is the parsed argv that decides, not a
+  phrase list. This repo no longer carries its own `gate.py`.
   - recursive delete/overwrite of `/`, `/etc`, home (`~`, `$HOME`) — including
     `rm -fr /`, `rm --recursive --force /`, `sudo rm -rf --no-preserve-root /`
   - `find ... -delete` / `find ... -exec rm`
@@ -26,8 +27,8 @@ requests and answers money math without any model call. Offline, stdlib only.
 - Each denial returns `route:"block"`, `blocked:true`, a stable `code` and a
   human `reason` (e.g. `destructive_root_delete`, `sql_delete_without_where`,
   `sensitive_file_read`, `remote_code_exec`, `bulk_mail`).
-- `T1`/`T2` regexes remain only as a cheap pre-filter for natural-language
-  policy phrases (prompt injection), not as the gate.
+- `T1`/`T2` regexes (`dsc.gate`) remain only as a cheap pre-filter for
+  natural-language policy phrases (prompt injection), not as the gate.
 - Math: `PDV 17% na neto 2400` -> **2808.00**; `17% od 1450` -> 246,50 (Decimal, half-up).
 - Diacritics fold: `Obriši` -> `obrisi` (risk match works on Bosnian text).
 - SQLite response cache (TTL 6 h) keyed by a **SHA-256 of the full normalized
@@ -35,6 +36,7 @@ requests and answers money math without any model call. Offline, stdlib only.
 
 ## Run
 ```bash
+pip install -r requirements.txt   # dsc, pinned by commit (gate + parse_amount)
 python3 fastpath.py            # :8071
 curl -s localhost:8071/optimize -d '{"text":"Obriši sve fajlove u /var/log"}'
 # {"route":"block","blocked":true,"code":"catastrophic_command","reason":"...",...}
@@ -93,10 +95,10 @@ make test
 
 ## Money formats
 
-`parse_amount` accepts BHS/EU/US thousands separators deterministically (Decimal, half-up):
-`2400`, `2.400`, `2.400,00`, `1.234.567,89`, `2,400.00` all resolve correctly. Regression
-tests cover these forms; the earlier regex stopped at the first separator and returned
-`2.81` for `2.400,00`.
+`dsc.amount.parse_amount` (imported here, not copied) accepts BHS/EU/US thousands separators
+deterministically (Decimal, half-up): `2400`, `2.400`, `2.400,00`, `1.234.567,89`, `2,400.00`
+all resolve correctly. Regression tests cover these forms; the earlier regex stopped at the
+first separator and returned `2.81` for `2.400,00`.
 
 ## How this is sold (and what it saves)
 
