@@ -7,10 +7,12 @@ now deny each one with a stable reason code.
 import http.client
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 
@@ -118,14 +120,28 @@ class CacheTest(unittest.TestCase):
 
     def test_key_is_hash_of_full_request(self):
         k = f.cache_key("PDV 17% na neto 2400")
-        self.assertTrue(k.startswith("q:"))
-        self.assertEqual(len(k), 2 + 64)
+        # scheme tag, not a digest constant: what matters is the shape
+        self.assertTrue(k.startswith("v2:"))
+        self.assertEqual(len(k), 3 + 64)
+        self.assertRegex(k[3:], r"^[0-9a-f]{64}$")
         self.assertNotIn("2400", k)
+        self.assertNotIn("pdv", k.lower())
+
+    def test_key_is_stable(self):
+        kw = ("kupi 2 mixera", "tenant-a")
+        self.assertEqual(f.cache_key(*kw), f.cache_key(*kw))
+        # same request twice through the service hits, not recomputes
+        f.cache_put(f.cache_key(*kw), "2 kom")
+        self.assertEqual(f.optimize("kupi 2 mixera", sid="tenant-a")["route"], "cache")
+        self.assertEqual(f.optimize("kupi 2 mixera", sid="tenant-a")["answer"], "2 kom")
 
     def test_two_amounts_do_not_collide(self):
         a = f.cache_key("PDV 17% na neto 2400")
         b = f.cache_key("PDV 17% na neto 4800")
         self.assertNotEqual(a, b)
+        # and a stored answer for one amount is never served for the other
+        f.cache_put(f.cache_key("kupi mixera za 2400 KM"), "2400-variant")
+        self.assertIsNone(f.cache_get(f.cache_key("kupi mixera za 4800 KM")))
         self.assertEqual(f.optimize("PDV 17% na neto 2400")["answer"], "2808.00")
         self.assertEqual(f.optimize("PDV 17% na neto 4800")["answer"], "5616.00")
 
@@ -136,6 +152,35 @@ class CacheTest(unittest.TestCase):
         self.assertIsNone(f.cache_get(f.cache_key(text, "tenant-b")))
         self.assertEqual(f.optimize(text, sid="tenant-a")["route"], "cache")
         self.assertEqual(f.optimize(text, sid="tenant-b")["route"], "llm")
+        # tenant value cannot leak through a delimiter in the text
+        self.assertNotEqual(f.cache_key("b|c", "a"), f.cache_key("c", "a|b"))
+
+    def test_poisoned_value_not_served_for_other_request(self):
+        """Poison A; B (other text / other tenant) must still miss."""
+        a = "koliko je glavni grad BiH"
+        b = "koliko je glavni grad Hrvatske"
+        f.cache_put(f.cache_key(a, "tenant-a"), "POISON")
+        self.assertEqual(f.cache_get(f.cache_key(a, "tenant-a")), "POISON")
+        self.assertIsNone(f.cache_get(f.cache_key(b, "tenant-a")))
+        self.assertIsNone(f.cache_get(f.cache_key(a, "tenant-b")))
+        self.assertIsNone(f.cache_get(f.cache_key(a)))  # unscoped tenant
+        self.assertEqual(f.optimize(b, sid="tenant-b")["route"], "llm")
+
+    def test_legacy_rows_miss_and_are_not_served(self):
+        """A v1 row (old 'q:' + sha256 key) can never be read as a v2 key."""
+        import hashlib, sqlite3
+        text = "koji je glavni grad"
+        old = "q:" + hashlib.sha256(
+            json.dumps({"v": "v1", "t": f.norm(text), "s": ""},
+                       ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")).encode()).hexdigest()
+        c = sqlite3.connect(self._db)
+        c.execute("CREATE TABLE IF NOT EXISTS cache(k TEXT PRIMARY KEY, a TEXT, ts REAL)")
+        c.execute("INSERT INTO cache(k,a,ts) VALUES(?,?,?)", (old, "STALE-v1", time.time() + 10_000))
+        c.commit(); c.close()
+        self.assertIsNone(f.cache_get(old))
+        self.assertIsNone(f.cache_get(f.cache_key(text)))
+        self.assertEqual(f.optimize(text)["route"], "llm")
 
     def test_poisoned_store_cannot_override_math(self):
         text = "PDV 17% na neto 2400"
@@ -182,6 +227,22 @@ class SharedCodeTest(unittest.TestCase):
         self.assertIs(gate, dsc_gate)
         self.assertEqual(dsc_gate.check("rm -fr /").code, "destructive_root_delete")
         self.assertEqual(f.optimize("rm -fr /")["code"], "destructive_root_delete")
+
+    def test_cache_key_is_dsc_cachekey(self):
+        from dsc.cachekey import SCHEME, request_key
+        self.assertEqual(SCHEME, "v2")
+        self.assertEqual(f.cache_key("zdravo", "t1"),
+                         request_key("zdravo", session="t1",
+                                     context={"app": "gama-fastpath"}))
+
+    def test_dsc_pin_is_a_full_commit(self):
+        with open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8") as fh:
+            req = fh.read()
+        m = re.search(r"^dsc @ git\+https://github\.com/gamai-io/dsc@([0-9a-f]{40})$",
+                      req, re.M)
+        self.assertIsNotNone(m, "dsc must be pinned to a full commit sha")
+        # No literal sha here: that only forces a test edit on every bump. The
+        # meaningful check is the installed dsc having the API, above.
 
     def test_no_local_gate_module(self):
         self.assertFalse(os.path.exists(os.path.join(ROOT, "gate.py")),

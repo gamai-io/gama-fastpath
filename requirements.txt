@@ -1,3 +1,4 @@
-# Gate decision + money parsing are the single dsc copies (see dsc/MIGRATION.md).
-# Pinned to the dsc extraction commit; bump the SHA together with dsc.
-dsc @ git+https://github.com/gamai-io/dsc@9e8be3684356aebc7f9f180c45a89d579ffc193b
+# Gate, money parsing and the cache key are the single dsc copies (see
+# dsc/MIGRATION.md). Pinned to the dsc cachekey commit; bump the SHA together
+# with dsc.
+dsc @ git+https://github.com/gamai-io/dsc@1c00fe9689a1e40d724e593ea26f712c51f2dc6e

@@ -4,13 +4,14 @@
 POST /optimize {"text": "..."} -> {"ok":true,"route":"block|math|math_pdv|cache|time|know|llm", ...}
 GET  /health, /stats
 """
-import hashlib, hmac, json, os, re, sqlite3, sys, time
+import hmac, json, os, re, sqlite3, sys, time
 from decimal import Decimal, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# The gate decision and the money-field parser live in dsc — one copy for the
-# whole pre-LLM stack (see dsc/MIGRATION.md).  Pin: requirements.txt.
+# The gate decision, money-field parser and cache key live in dsc — one copy
+# for the whole pre-LLM stack (see dsc/MIGRATION.md).  Pin: requirements.txt.
 from dsc.amount import parse_amount
+from dsc.cachekey import SCHEME as KEY_SCHEME, is_current as is_current_key, request_key
 from dsc.gate import check as gate_check
 
 PORT = int(os.environ.get("GAMA_FASTPATH_PORT", "8071"))
@@ -26,20 +27,23 @@ STATS = {"calls": 0, "hit": 0, "blocked": 0, "answered": 0}
 def fold(t): return str(t or "").translate(FOLD)
 def norm(t): return re.sub(r"\s+", " ", fold(t).lower().strip())
 
-CACHE_VERSION = "v1"
+CACHE_VERSION = KEY_SCHEME  # "v2"; v1 rows ("q:" + sha256) can no longer match
 
 
 def cache_key(text, sid=""):
-    """Cache key = hash of the full normalized request (text + tenant).
+    """Cache key = ``dsc.cachekey.request_key`` for the full request.
 
     Hashing the whole request means two different inputs can never share an
-    entry, and the key contains no caller-controlled plaintext.  ``sid`` is an
-    optional tenant/session scope: entries from one caller are not served to
-    another.
+    entry, and the key contains no caller-controlled plaintext.  ``sid`` is the
+    tenant/session scope: entries from one caller are not served to another.
+    ``context`` namespaces this service so a key can never be replayed against
+    gama-offline even if the two ever shared a database.
+
+    Scheme v2: keys are ``v2:<sha256>`` over canonical JSON; pre-v2 rows keep
+    their old digest and simply miss (no migration, no stale hit).
     """
-    payload = json.dumps({"v": CACHE_VERSION, "t": norm(text), "s": str(sid or "")},
-                         ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "q:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return request_key(text, session=str(sid or ""),
+                       context={"app": "gama-fastpath"})
 
 
 def db():
@@ -48,6 +52,11 @@ def db():
     return c
 
 def cache_get(k):
+    # Defence in depth: a key from another scheme is never a hit, even if a
+    # caller constructs it by hand.  Old rows stay in the table untouched and
+    # expire by TTL; they are simply unreachable.
+    if not is_current_key(k):
+        return None
     try:
         c = db(); r = c.execute("SELECT a,ts FROM cache WHERE k=?", (k,)).fetchone(); c.close()
         if r and (time.time() - r[1]) < TTL: return r[0]

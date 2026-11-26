@@ -9,4 +9,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
+      # Prove the pinned dsc is the one with the shared cache key, not a stale
+      # wheel or an older commit silently satisfying the import.
+      - run: python3 -c "from dsc.cachekey import SCHEME, request_key; assert SCHEME == 'v2'"
       - run: python3 -m unittest discover -s tests -v

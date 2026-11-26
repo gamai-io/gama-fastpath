@@ -74,10 +74,14 @@ make test
 
 ## Cache safety
 
-- The key is `SHA-256({"v","t","s"})` where `t` is the **full normalized
-  request** and `s` is an optional tenant/session (`sid` or `tenant` in the
-  body, or `X-Tenant-ID`). Two different inputs or tenants can never share an
-  entry, and caller text is not stored in the key.
+- The key is `dsc.cachekey.request_key` — **`v2:` + SHA-256** over the canonical
+  JSON object `{"v","t","tenant","session","ctx"}`, where `t` is the full
+  normalized request and `session` is the optional tenant (`sid` or `tenant` in
+  the body, or `X-Tenant-ID`). Fields are JSON values, not `|`-joined
+  substrings, so a delimiter in the text cannot collide with another tenant.
+  Two different inputs or tenants never share an entry, and caller text is not
+  stored in the key. Pre-v2 rows are unreachable (old `q:` keys): they miss
+  once and age out by TTL. `cache_get` also refuses any non-v2 key.
 - Deterministic math is computed **before** the cache lookup and is never
   read from it, so a stored answer cannot override `PDV ...` arithmetic
   (regression: storing `0.00` for a PDV query still returns `2808.00`).
