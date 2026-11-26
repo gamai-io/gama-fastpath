@@ -8,10 +8,12 @@ import hmac, json, os, re, sqlite3, sys, time
 from decimal import Decimal, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# The gate decision, money-field parser and cache key live in dsc — one copy
-# for the whole pre-LLM stack (see dsc/MIGRATION.md).  Pin: requirements.txt.
+# The gate decision, money-field parser, cache key and cacheability policy
+# live in dsc — one copy for the whole pre-LLM stack (see dsc/MIGRATION.md).
+# Pin: requirements.txt.
 from dsc.amount import parse_amount
 from dsc.cachekey import SCHEME as KEY_SCHEME, is_current as is_current_key, request_key
+from dsc.cachepolicy import text_block_reason
 from dsc.gate import check as gate_check
 
 PORT = int(os.environ.get("GAMA_FASTPATH_PORT", "8071"))
@@ -63,11 +65,18 @@ def cache_get(k):
     except Exception: pass
     return None
 
-def cache_put(k, a):
+def cache_put(k, a, text=""):
+    # The freshness/multi-step rule is dsc.cachepolicy (shared with
+    # gama-offline).  Passing the request text is optional for backwards
+    # compatibility, but every in-repo caller does: a clock or stock answer
+    # must never enter this store.
+    if text_block_reason(text):
+        return False
     try:
         c = db(); c.execute("INSERT OR REPLACE INTO cache(k,a,ts) VALUES(?,?,?)", (k, a, time.time()))
         c.commit(); c.close()
-    except Exception: pass
+        return True
+    except Exception: return False
 
 def pdv_na_neto(t):
     """PDV_NA_NETO_V2: 'PDV 17% na neto 2.400,00' -> 2808.00 (Decimal, half-up)."""
@@ -114,10 +123,11 @@ def optimize(text, sid=""):
         STATS["answered"] += 1
         return {"ok": True, "route": "math", "answer": v, "ms": ms()}
     k = cache_key(t, sid)
-    hit = cache_get(k)
-    if hit:
-        STATS["hit"] += 1
-        return {"ok": True, "route": "cache", "cached": True, "answer": hit, "ms": ms()}
+    if text_block_reason(t) is None:
+        hit = cache_get(k)
+        if hit:
+            STATS["hit"] += 1
+            return {"ok": True, "route": "cache", "cached": True, "answer": hit, "ms": ms()}
     if re.fullmatch(r"(koje je )?(vrijeme|datum|danas)\??", low):
         return {"ok": True, "route": "time", "answer": time.strftime("%d.%m.%Y %H:%M"), "ms": ms()}
     return {"ok": True, "route": "llm", "ms": ms()}
@@ -157,9 +167,14 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/store"):
             if not store_allowed(self.client_address[0], self.headers.get("X-Store-Token", "")):
                 return self._send({"ok": False, "err": "forbidden"}, 403)
+            text = str(j.get("text", ""))
             a = str(j.get("answer", ""))
-            if a: cache_put(cache_key(j.get("text", ""), sid), a)
-            return self._send({"ok": True})
+            reason = text_block_reason(text)
+            stored = bool(a) and not reason and cache_put(cache_key(text, sid), a, text)
+            out = {"ok": True, "stored": bool(stored)}
+            if reason:
+                out["reason"] = reason
+            return self._send(out)
         self._send({"ok": False, "err": "not found"}, 404)
 
 USAGE = "usage: fastpath.py [--check TEXT]   (serve :%d by default)" % PORT

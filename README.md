@@ -32,11 +32,13 @@ requests and answers money math without any model call. Offline, stdlib only.
 - Math: `PDV 17% na neto 2400` -> **2808.00**; `17% od 1450` -> 246,50 (Decimal, half-up).
 - Diacritics fold: `Obriši` -> `obrisi` (risk match works on Bosnian text).
 - SQLite response cache (TTL 6 h) keyed by a **SHA-256 of the full normalized
-  request + tenant/session**, `/stats`.
+  request + tenant/session**, `/stats`. Freshness (clock, stock, price) and
+  multi-step text are never read from or written to it — the rules are
+  `dsc.cachepolicy`, shared with `gama-offline`.
 
 ## Run
 ```bash
-pip install -r requirements.txt   # dsc, pinned by commit (gate + parse_amount)
+pip install -r requirements.txt   # dsc, pinned by commit (gate + amount + cache policy)
 python3 fastpath.py            # :8071
 curl -s localhost:8071/optimize -d '{"text":"Obriši sve fajlove u /var/log"}'
 # {"route":"block","blocked":true,"code":"catastrophic_command","reason":"...",...}
@@ -85,6 +87,12 @@ make test
 - Deterministic math is computed **before** the cache lookup and is never
   read from it, so a stored answer cannot override `PDV ...` arithmetic
   (regression: storing `0.00` for a PDV query still returns `2808.00`).
+- `dsc.cachepolicy.block_reason` owns "may this be replayed?". `cache_put` and
+  `/store` refuse fresh text (clock, stock, price), multi-step chains and
+  answers shorter than 15 chars; `/store` answers
+  `{"ok": true, "stored": false, "reason": "fresh"}` instead of silently
+  writing. `optimize` skips the cache read for the same texts, so a row written
+  before this rule existed is ignored rather than served.
 
 ## Security / deployment
 

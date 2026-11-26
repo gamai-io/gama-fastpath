@@ -258,6 +258,9 @@ class SharedCodeTest(unittest.TestCase):
                     for t in n.targets if isinstance(t, ast.Name)]
         self.assertNotIn("T1", assigned)
         self.assertNotIn("T2", assigned)
+        # the freshness/multi/mutating rules are data in dsc.cachepolicy now
+        for name in ("_FRESH", "_MULTI", "_MUTATING", "FRESH_WORDS"):
+            self.assertNotIn(name, assigned)
 
 
 class CLITest(unittest.TestCase):

@@ -1,4 +1,5 @@
-import os, sys, tempfile, unittest
+import http.client, json, os, sys, tempfile, threading, time, unittest
+from http.server import ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["GAMA_FASTPATH_DB"] = "/tmp/gama_fastpath_test.db"
 import fastpath as f
@@ -61,5 +62,66 @@ class T(unittest.TestCase):
         self.assertEqual(f.optimize("Izračunaj PDV 17% na neto 2400")["route"], "math_pdv")
         self.assertEqual(f.optimize("Koliko je 17% od 1450?")["route"], "math")
         self.assertEqual(f.optimize("zdravo")["route"], "llm")
+
+
+class CachePolicyTest(unittest.TestCase):
+    """dsc.cachepolicy is the only freshness rule, including on this cache."""
+
+    def setUp(self):
+        self._db = tempfile.mktemp(suffix=".db")
+        f.DB = self._db
+
+    def tearDown(self):
+        try:
+            os.remove(self._db)
+        except OSError:
+            pass
+
+    def test_pdv_query_is_cacheable(self):
+        from dsc.cachepolicy import text_block_reason
+        self.assertIsNone(text_block_reason("PDV 17% na neto 2400"))
+        self.assertTrue(f.cache_put(f.cache_key("PDV 17% na neto 2400"),
+                                    "2808.00", "PDV 17% na neto 2400"))
+
+    def test_fresh_text_is_never_served_from_cache(self):
+        """Even a row written before the policy existed must not be served."""
+        import sqlite3
+        from dsc.cachepolicy import text_block_reason
+        for q in ("koliko je sati", "koje je vrijeme", "lager 100011",
+                  "saldo kupca 211008", "koliko kosta XHD211"):
+            self.assertTrue(text_block_reason(q), q)
+            self.assertFalse(f.cache_put(f.cache_key(q), "STALE", q), q)
+        q = "koje je vrijeme"
+        k = f.cache_key(q)
+        c = sqlite3.connect(self._db)
+        c.execute("CREATE TABLE IF NOT EXISTS cache(k TEXT PRIMARY KEY, a TEXT, ts REAL)")
+        c.execute("INSERT INTO cache(k,a,ts) VALUES(?,?,?)", (k, "12:00", time.time()))
+        c.commit(); c.close()
+        self.assertEqual(f.cache_get(k), "12:00")         # the row is there
+        self.assertEqual(f.optimize(q)["route"], "time")  # but it is not used
+
+    def test_store_endpoint_refuses_fresh_text(self):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), f.H)
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        port = srv.server_address[1]
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            c.request("POST", "/store",
+                      json.dumps({"text": "koliko je sati", "answer": "14:05"}),
+                      {"Content-Type": "application/json"})
+            out = json.loads(c.getresponse().read())
+            c.close()
+            self.assertTrue(out["ok"])
+            self.assertFalse(out["stored"])
+            self.assertEqual(out["reason"], "fresh")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            th.join(timeout=5)
+
+    def test_multi_step_is_not_cacheable(self):
+        q = "posalji mail kupcu i otvori ponudu"
+        self.assertFalse(f.cache_put(f.cache_key(q), "done, 2 steps", q))
 
 if __name__ == "__main__": unittest.main()
